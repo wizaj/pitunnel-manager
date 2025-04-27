@@ -16,6 +16,9 @@ A terminal-based configurator for managing PiTunnel connections. This script pro
   - Persistent tunnels that automatically start on device boot
 - Terminate existing tunnels
 
+## Requirements
+You need an account at https://www.pitunnel.com/ and to install PiTunnel on your Rasbperry Pi.
+
 ## Usage
 
 1. Make the script executable:
