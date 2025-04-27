@@ -132,12 +132,52 @@ def create_tunnel():
         print("\nTunnel creation cancelled.")
         time.sleep(1)
 
+def get_persistent_tunnels():
+    """Get list of persistent tunnels configured in PiTunnel."""
+    try:
+        # Get list of persistent tunnels using pitunnel --list
+        result = subprocess.run(
+            ["pitunnel", "--list"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        persistent_tunnels = []
+        lines = result.stdout.strip().splitlines()
+        
+        # Find the table in the output
+        table_start = False
+        for line in lines:
+            if '| ID |' in line:
+                table_start = True
+                continue
+            if table_start and line.startswith('+----+'):
+                continue
+            if table_start and '|' in line:
+                parts = line.split('|')
+                if len(parts) >= 3:
+                    tunnel_id = parts[1].strip()
+                    args = parts[2].strip()
+                    persistent_tunnels.append({
+                        "id": tunnel_id,
+                        "args": args
+                    })
+        
+        return persistent_tunnels
+    except subprocess.SubprocessError as e:
+        print(f"Error getting persistent tunnels: {e}")
+        return []
+
 def remove_tunnel(processes):
     """Remove a running pitunnel process."""
     if not processes:
         print("\nNo active tunnels to remove.")
         input("Press Enter to continue...")
         return
+    
+    # Get persistent tunnels
+    persistent_tunnels = get_persistent_tunnels()
     
     while True:
         choice = input("\nEnter the number of the tunnel to remove (or 0 to cancel): ")
@@ -147,19 +187,40 @@ def remove_tunnel(processes):
         try:
             choice = int(choice)
             if 1 <= choice <= len(processes):
-                pid = processes[choice-1]["pid"]
+                process = processes[choice-1]
+                pid = process["pid"]
+                port = process["port"]
+                name = process["name"]
                 
-                # Confirm before killing
-                confirm = input(f"Are you sure you want to terminate tunnel #{choice} (PID {pid})? (y/n): ").lower()
+                # Check if this is a persistent tunnel
+                is_persistent = False
+                persistent_id = None
+                for tunnel in persistent_tunnels:
+                    if (f"--port={port}" in tunnel["args"]) and (f"--name={name}" in tunnel["args"] if name != "Unnamed" else True):
+                        is_persistent = True
+                        persistent_id = tunnel["id"]
+                        break
+                
+                # Confirm before removing
+                if is_persistent:
+                    confirm = input(f"Tunnel #{choice} (PID {pid}, Port {port}) is persistent. Remove permanently? (y/n): ").lower()
+                else:
+                    confirm = input(f"Are you sure you want to terminate tunnel #{choice} (PID {pid})? (y/n): ").lower()
                 
                 if confirm.startswith('y'):
                     try:
+                        # If persistent, remove using pitunnel --remove
+                        if is_persistent and persistent_id:
+                            subprocess.run(["pitunnel", "--remove", persistent_id], check=True)
+                            print(f"Persistent tunnel (ID {persistent_id}) has been removed.")
+                        
+                        # Terminate the running process regardless
                         os.kill(int(pid), 15)  # Send SIGTERM
                         print(f"Tunnel with PID {pid} has been terminated.")
                         time.sleep(2)
                         break
                     except Exception as e:
-                        print(f"Error terminating tunnel: {e}")
+                        print(f"Error removing tunnel: {e}")
                         input("Press Enter to continue...")
                         break
                 else:
