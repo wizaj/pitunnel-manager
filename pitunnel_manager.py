@@ -16,7 +16,50 @@ def clear_screen():
 def get_running_pitunnels():
     """Get list of running pitunnel processes."""
     try:
-        # Get running processes containing "pitunnel"
+        # Instead of ps aux, use pitunnel --status to get actual tunnels
+        # First try the specific command for PiTunnel status
+        try:
+            status_result = subprocess.run(
+                ["pitunnel", "--status"],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            # If --status worked, parse its output
+            if status_result.returncode == 0:
+                parsed_processes = []
+                lines = status_result.stdout.strip().splitlines()
+                
+                # Parse table format if it exists
+                table_start = False
+                for line in lines:
+                    if 'PID' in line and 'Port' in line and 'Type' in line:
+                        table_start = True
+                        continue
+                    if table_start and len(line.strip()) > 0 and not line.startswith('+---'):
+                        parts = [p.strip() for p in line.split('|') if p.strip()]
+                        if len(parts) >= 4:
+                            pid = parts[0]
+                            port = parts[1]
+                            tunnel_type = parts[2]
+                            name = parts[3] if len(parts) > 3 else "Unnamed"
+                            
+                            parsed_processes.append({
+                                "pid": pid,
+                                "port": port,
+                                "name": name,
+                                "type": tunnel_type,
+                                "command": f"pitunnel --port={port}" + (f" --name={name}" if name != "Unnamed" else "")
+                            })
+                
+                if parsed_processes:
+                    return parsed_processes
+        except (subprocess.SubprocessError, FileNotFoundError):
+            # If --status failed, fall back to ps command but with improved filtering
+            pass
+            
+        # Fallback: use ps but with better filtering
         result = subprocess.run(
             ["ps", "aux"], 
             capture_output=True, 
@@ -26,7 +69,12 @@ def get_running_pitunnels():
         
         processes = []
         for line in result.stdout.splitlines():
-            if "pitunnel" in line and not "pitunnel_manager.py" in line:
+            # Only include lines with pitunnel command (not processes containing pitunnel in name)
+            # Exclude defunct processes and our manager script
+            if (" pitunnel " in line or line.endswith(" pitunnel")) and \
+               "<defunct>" not in line and \
+               "pitunnel_manager.py" not in line and \
+               "pitunnel_terminal" not in line:
                 processes.append(line)
         
         # Parse the process information
@@ -213,10 +261,11 @@ def remove_tunnel(processes):
                         if is_persistent and persistent_id:
                             subprocess.run(["pitunnel", "--remove", persistent_id], check=True)
                             print(f"Persistent tunnel (ID {persistent_id}) has been removed.")
-                        
-                        # Terminate the running process regardless
-                        os.kill(int(pid), 15)  # Send SIGTERM
-                        print(f"Tunnel with PID {pid} has been terminated.")
+                            # The pitunnel command will handle stopping the running process
+                        else:
+                            # For non-persistent tunnels, use pitunnel --stop with port
+                            subprocess.run(["pitunnel", "--stop", f"--port={port}"], check=True)
+                            print(f"Tunnel on port {port} has been stopped.")
                         time.sleep(2)
                         break
                     except Exception as e:
@@ -230,6 +279,63 @@ def remove_tunnel(processes):
                 print("Invalid selection. Please try again.")
         except ValueError:
             print("Please enter a valid number.")
+
+def reload_tunnels():
+    """Reload all persistent tunnels (remove and recreate them)."""
+    persistent_tunnels = get_persistent_tunnels()
+    
+    if not persistent_tunnels:
+        print("\nNo persistent tunnels found to reload.")
+        input("Press Enter to continue...")
+        return
+    
+    print("\nPersistent Tunnels:")
+    print("-" * 60)
+    print(f"{'#':<3} {'ID':<5} {'Arguments'}")
+    print("-" * 60)
+    
+    for i, tunnel in enumerate(persistent_tunnels, 1):
+        print(f"{i:<3} {tunnel['id']:<5} {tunnel['args']}")
+    
+    confirm = input("\nAre you sure you want to reload all persistent tunnels? (y/n): ").lower()
+    if not confirm.startswith('y'):
+        print("\nReload cancelled.")
+        time.sleep(1)
+        return
+    
+    print("\nReloading tunnels...")
+    # Store the configurations
+    tunnel_configs = []
+    for tunnel in persistent_tunnels:
+        # Parse the arguments into a list
+        args = tunnel['args'].split()
+        tunnel_configs.append(args)
+        
+        # Remove the tunnel
+        try:
+            subprocess.run(["pitunnel", "--remove", tunnel['id']], check=True)
+            print(f"Removed tunnel ID {tunnel['id']}")
+            # The pitunnel command will handle stopping the running process
+        except Exception as e:
+            print(f"Error removing tunnel ID {tunnel['id']}: {e}")
+    
+    # Wait a moment for processes to terminate
+    time.sleep(2)
+    
+    # Recreate the tunnels
+    for i, args in enumerate(tunnel_configs, 1):
+        try:
+            # Add the actual pitunnel command to the beginning
+            cmd = ["pitunnel"] + args
+            subprocess.Popen(cmd)
+            print(f"Recreated tunnel {i}/{len(tunnel_configs)} with args: {' '.join(args)}")
+            # Small delay to avoid potential issues with starting multiple tunnels at once
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"Error recreating tunnel: {e}")
+    
+    print("\nAll tunnels have been reloaded!")
+    input("Press Enter to continue...")
 
 def main_menu():
     """Display the main menu and handle user input."""
@@ -245,7 +351,8 @@ def main_menu():
         print("\nMenu Options:")
         print("1. Create a new tunnel")
         print("2. Remove a tunnel")
-        print("3. Refresh tunnel list")
+        print("3. Reload all persistent tunnels")
+        print("4. Refresh tunnel list")
         print("q. Quit")
         
         choice = input("\nSelect an option: ").lower()
@@ -255,6 +362,8 @@ def main_menu():
         elif choice == '2':
             remove_tunnel(processes)
         elif choice == '3':
+            reload_tunnels()
+        elif choice == '4':
             # Just refresh the display - will happen on next loop
             pass
         elif choice == 'q':
